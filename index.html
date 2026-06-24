@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>1대1 3D 복싱</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Impact', sans-serif; color: #fff; user-select: none; }
+        #lobby { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; z-index: 20; background: rgba(0,0,0,0.9); padding: 30px; border-radius: 15px; border: 3px solid #ff4757; width: 80%; box-shadow: 0 0 20px #ff4757; }
+        #qr-code { margin: 20px auto; display: block; background: white; padding: 10px; border-radius: 10px; }
+        .btn { background: #ff4757; color: white; border: none; padding: 15px 30px; font-size: 20px; font-weight: bold; border-radius: 8px; cursor: pointer; text-transform: uppercase; box-shadow: 0 5px 0 #c0392b; transition: 0.1s; }
+        .btn:active { transform: translateY(5px); box-shadow: 0 0 0 #c0392b; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; display: none; z-index: 10; }
+        .hp-bar-container { position: absolute; top: 20px; width: 40%; height: 30px; background: rgba(50,50,50,0.8); border: 3px solid #fff; border-radius: 5px; overflow: hidden; box-shadow: 0 0 10px rgba(255,255,255,0.5); }
+        #my-hp-container { left: 5%; }
+        #opp-hp-container { right: 5%; }
+        .hp-bar { width: 100%; height: 100%; transition: width 0.2s ease-out; }
+        #my-hp { background: linear-gradient(90deg, #2ed573, #7bed9f); }
+        #opp-hp { background: linear-gradient(90deg, #ff4757, #ff6b81); }
+        #status-text { position: absolute; top: 70px; left: 50%; transform: translateX(-50%); font-size: 40px; font-weight: bold; text-shadow: 3px 3px 0 #000, -1px -1px 0 #000; color: #f1c40f; text-align: center; }
+        #damage-flash { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: red; opacity: 0; pointer-events: none; z-index: 5; transition: opacity 0.1s; }
+        #debug { position: absolute; bottom: 10px; left: 10px; font-size: 14px; color: #00ff00; text-shadow: 1px 1px 0 #000; font-family: monospace; }
+        .name-tag { position: absolute; top: -25px; font-size: 16px; color: white; text-shadow: 1px 1px #000; }
+    </style>
+</head>
+<body>
+    <div id="damage-flash"></div>
+    <div id="lobby">
+        <h1 style="color: #ff4757; margin-top:0;">BOXING CLASH</h1>
+        <h2 id="lobby-title">상대방 대기 중...</h2>
+        <p id="lobby-desc">이 기기로 아래 QR을 찍거나 링크를 접속하세요!</p>
+        <img id="qr-code" src="" alt="QR Code" style="display:none;">
+        <input type="text" id="link-input" readonly style="width:100%; text-align:center; padding:10px; display:none; margin-bottom: 15px; font-size: 12px;">
+        <button class="btn" id="start-motion-btn">게임 시작 (센서 켜기)</button>
+    </div>
+
+    <div id="ui-layer">
+        <div id="my-hp-container">
+            <div class="name-tag" style="left:0;">ME</div>
+            <div id="my-hp" class="hp-bar"></div>
+        </div>
+        <div id="opp-hp-container">
+            <div class="name-tag" style="right:0;">OPPONENT</div>
+            <div id="opp-hp" class="hp-bar"></div>
+        </div>
+        <div id="status-text">준비...</div>
+    </div>
+    <div id="debug">System Ready</div>
+
+    <script>
+        // --- 사운드 효과 (Web Audio API) ---
+        let audioCtx;
+        function initAudio() {
+            if(!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+        }
+        function playSound(type) {
+            if(!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            
+            if(type === 'swing') { // 주먹 휘두르는 소리
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(50, audioCtx.currentTime + 0.1);
+                gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+                osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+            } else if (type === 'hit') { // 타격음 (묵직한 소리)
+                osc.type = 'square';
+                osc.frequency.setValueAtTime(100, audioCtx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(20, audioCtx.currentTime + 0.2);
+                gain.gain.setValueAtTime(1, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+                osc.start(); osc.stop(audioCtx.currentTime + 0.2);
+            }
+        }
+
+        // --- 글로벌 상태 ---
+        let peer, conn;
+        let isHost = true;
+        let targetPeerId = null;
+        let myHp = 100, oppHp = 100;
+        let isDodging = false;
+        let canAction = true;
+        
+        let screenShake = 0; // 화면 흔들림 강도
+        let particles = []; // 타격 이펙트 파티클
+
+        const urlHash = window.location.hash.substring(1);
+        if (urlHash) { isHost = false; targetPeerId = urlHash; }
+
+        // --- P2P 통신 ---
+        function initPeer() {
+            peer = new Peer();
+            peer.on('open', (id) => {
+                if (isHost) {
+                    const gameUrl = window.location.href.split('#')[0] + '#' + id;
+                    document.getElementById('link-input').value = gameUrl;
+                    document.getElementById('link-input').style.display = 'block';
+                    document.getElementById('qr-code').src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(gameUrl)}`;
+                    document.getElementById('qr-code').style.display = 'block';
+                } else {
+                    document.getElementById('lobby-title').innerText = "호스트 연결 중...";
+                    conn = peer.connect(targetPeerId);
+                    setupConnection();
+                }
+            });
+            peer.on('connection', (connection) => { conn = connection; setupConnection(); });
+        }
+
+        function setupConnection() {
+            conn.on('open', () => {
+                document.getElementById('lobby').style.display = 'none';
+                document.getElementById('ui-layer').style.display = 'block';
+                showText("FIGHT!", 2000);
+            });
+            conn.on('data', (data) => {
+                if (data.type === 'straight' || data.type === 'hook' || data.type === 'uppercut') {
+                    animateOpponentAttack(data.type);
+                    if (!isDodging) {
+                        playSound('hit');
+                        let damage = data.type === 'straight' ? 10 : (data.type === 'hook' ? 15 : 20);
+                        myHp = Math.max(0, myHp - damage);
+                        document.getElementById('my-hp').style.width = myHp + '%';
+                        
+                        // 타격 효과 (화면 흔들림 + 빨간 번쩍임)
+                        screenShake = 0.2; 
+                        document.getElementById('damage-flash').style.opacity = '0.5';
+                        setTimeout(() => { document.getElementById('damage-flash').style.opacity = '0'; }, 100);
+                        showText(`피격! (${data.type.toUpperCase()})`, 800, '#ff4757');
+                        
+                        sendAction('hit_success_' + damage);
+                        checkGameOver();
+                    } else {
+                        showText("회피 성공!", 800, '#2ed573');
+                    }
+                } else if (data.type.startsWith('hit_success_')) {
+                    let dmg = parseInt(data.type.split('_')[2]);
+                    oppHp = Math.max(0, oppHp - dmg);
+                    document.getElementById('opp-hp').style.width = oppHp + '%';
+                    playSound('hit');
+                    createHitParticles(new THREE.Vector3(0, 1.4, -0.8)); // 상대방 위치에 파티클
+                    showText("적중!!", 800, '#f1c40f');
+                    checkGameOver();
+                } else if (data.type === 'dodge_start') {
+                    opponentMesh.position.y = -0.5; // 상대가 숙임
+                } else if (data.type === 'dodge_end') {
+                    opponentMesh.position.y = 0;
+                }
+            });
+        }
+
+        function sendAction(actionType) { if (conn && conn.open) conn.send({ type: actionType }); }
+        function showText(msg, time, color = '#fff') {
+            const el = document.getElementById('status-text');
+            el.innerText = msg;
+            el.style.color = color;
+            if(time) setTimeout(() => { el.innerText = ""; }, time);
+        }
+
+        function checkGameOver() {
+            if (myHp <= 0 || oppHp <= 0) {
+                canAction = false;
+                showText(myHp <= 0 ? "KO 패배..." : "KO 승리!!", 5000, myHp <= 0 ? '#ff4757' : '#2ed573');
+            }
+        }
+
+        // --- 센서 모션 (타격 및 회피) ---
+        function initMotionSensors() {
+            initAudio(); // 권한 버튼 누를 때 오디오 활성화
+            if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+                DeviceMotionEvent.requestPermission().then(state => {
+                    if (state === 'granted') {
+                        window.addEventListener('devicemotion', handleMotion);
+                        window.addEventListener('deviceorientation', handleOrientation);
+                    }
+                }).catch(console.error);
+            } else {
+                window.addEventListener('devicemotion', handleMotion);
+                window.addEventListener('deviceorientation', handleOrientation);
+            }
+            initPeer();
+        }
+
+        // 모션 감지 로직 개선
+        function handleMotion(event) {
+            if (!canAction) return;
+            let acc = event.acceleration || event.accelerationIncludingGravity;
+            if (!acc || acc.x === null) return;
+
+            let debug = document.getElementById('debug');
+            const threshold = 10; // 모션 인식 민감도 (조금 더 부드럽게)
+
+            // 1. 피하기 (Sudden Drop): 폰이 갑자기 아래로 쑥 내려갈 때 (Y축 하강 가속도)
+            if (acc.y < -12) { 
+                if(!isDodging) triggerDodge();
+                debug.innerText = "Motion: DODGE (Drop)";
+                return;
+            }
+            // 2. 스트레이트: 앞으로 강하게 내지름 (Z축 음수)
+            if (acc.z < -threshold) { triggerMyAttack('straight'); debug.innerText = "Motion: STRAIGHT"; return; }
+            // 3. 훅: 좌우로 강하게 꺾음/휘두름 (X축 변화)
+            if (Math.abs(acc.x) > threshold + 2) { triggerMyAttack('hook'); debug.innerText = "Motion: HOOK"; return; }
+            // 4. 어퍼컷: 위로 강하게 쳐올림 (Y축 상승)
+            if (acc.y > threshold) { triggerMyAttack('uppercut'); debug.innerText = "Motion: UPPERCUT"; return; }
+        }
+
+        // 카메라 기울기(자이로스코프) 적용
+        let baseAlpha = null;
+        function handleOrientation(event) {
+            if(event.alpha === null) return;
+            // 카메라 시선 처리 (폰의 움직임에 따라 시선과 팔이 같이 움직임)
+            const beta = THREE.MathUtils.degToRad(event.beta - 90); // 세로 기울기
+            const gamma = THREE.MathUtils.degToRad(event.gamma); // 가로 기울기
+            
+            // 시야 부드럽게 회전
+            camera.rotation.x = THREE.MathUtils.lerp(camera.rotation.x, beta * 0.5, 0.1);
+            camera.rotation.y = THREE.MathUtils.lerp(camera.rotation.y, gamma * -0.5, 0.1);
+        }
+
+        function triggerMyAttack(type) {
+            canAction = false;
+            playSound('swing');
+            sendAction(type);
+            animateMyAttack(type);
+            setTimeout(() => { canAction = true; }, 500); // 쿨타임 감소시켜 스피디하게
+        }
+
+        function triggerDodge() {
+            isDodging = true;
+            sendAction('dodge_start');
+            targetCameraY = 0.5; // 카메라를 확 낮춤
+            setTimeout(() => { 
+                isDodging = false; 
+                sendAction('dodge_end'); 
+                targetCameraY = 1.6; // 복구
+            }, 800);
+        }
+
+        // PC 테스트용 키보드 조작
+        window.addEventListener('keydown', (e) => {
+            if(!canAction) return;
+            if (e.key === 'w') triggerMyAttack('straight');
+            if (e.key === 'a' || e.key === 'd') triggerMyAttack('hook');
+            if (e.key === 'q') triggerMyAttack('uppercut');
+            if (e.key === 's') triggerDodge();
+        });
+
+        document.getElementById('start-motion-btn').addEventListener('click', () => {
+            initMotionSensors();
+            document.getElementById('start-motion-btn').style.display = 'none';
+            if(isHost) document.getElementById('lobby-title').innerText = "상대방 접속 대기중...";
+        });
+
+        // --- Three.js 그래픽 및 애니메이션 렌더링 ---
+        let scene, camera, renderer;
+        let opponentMesh;
+        let leftArmGroup, rightArmGroup; // 개선된 길쭉한 팔
+        let oppLeftGlove, oppRightGlove;
+        let targetCameraY = 1.6;
+        let cameraBaseY = 1.6;
+
+        // 팔 애니메이션 타겟 위치
+        let lArmTarget = new THREE.Vector3(-0.3, -0.4, -0.5);
+        let rArmTarget = new THREE.Vector3(0.3, -0.4, -0.5);
+        let lArmBase = new THREE.Vector3(-0.3, -0.4, -0.5);
+        let rArmBase = new THREE.Vector3(0.3, -0.4, -0.5);
+
+        function createArm(color) {
+            const group = new THREE.Group();
+            // 긴 팔 (Cylinder)
+            const armGeo = new THREE.CylinderGeometry(0.06, 0.08, 0.6, 12);
+            armGeo.rotateX(Math.PI / 2); // 앞으로 뻗도록 회전
+            const armMat = new THREE.MeshStandardMaterial({ color: 0x555555 });
+            const arm = new THREE.Mesh(armGeo, armMat);
+            arm.position.z = 0.3;
+            // 글러브 (Sphere)
+            const gloveGeo = new THREE.SphereGeometry(0.15, 16, 16);
+            const gloveMat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.4 });
+            const glove = new THREE.Mesh(gloveGeo, gloveMat);
+            glove.position.z = -0.1; // 실린더 끝에 부착
+            
+            group.add(arm);
+            group.add(glove);
+            return group;
+        }
+
+        function init3D() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.Fog(0x000000, 2, 10);
+
+            camera = new THREE.PerspectiveCamera(80, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 1.6, 2);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+            const spotLight = new THREE.SpotLight(0xffffff, 1);
+            spotLight.position.set(0, 5, 0);
+            spotLight.angle = Math.PI / 4;
+            scene.add(spotLight);
+
+            // 링 바닥 (격자 무늬)
+            const gridHelper = new THREE.GridHelper(10, 10, 0xff4757, 0x444444);
+            gridHelper.position.y = 0;
+            scene.add(gridHelper);
+
+            // 상대방 구성
+            opponentMesh = new THREE.Group();
+            const bodyGeo = new THREE.CylinderGeometry(0.4, 0.3, 1.2, 12);
+            const bodyMat = new THREE.MeshStandardMaterial({ color: 0x303952 });
+            const body = new THREE.Mesh(bodyGeo, bodyMat);
+            body.position.y = 0.8;
+            opponentMesh.add(body);
+
+            const headGeo = new THREE.BoxGeometry(0.4, 0.4, 0.4);
+            const headMat = new THREE.MeshStandardMaterial({ color: 0xffa502 });
+            const head = new THREE.Mesh(headGeo, headMat);
+            head.position.y = 1.6;
+            opponentMesh.add(head);
+
+            const oppGloveGeo = new THREE.SphereGeometry(0.18, 16, 16);
+            const oppGloveMat = new THREE.MeshStandardMaterial({ color: 0xff4757 });
+            oppLeftGlove = new THREE.Mesh(oppGloveGeo, oppGloveMat);
+            oppLeftGlove.position.set(-0.4, 1.2, -0.3);
+            oppRightGlove = new THREE.Mesh(oppGloveGeo, oppGloveMat);
+            oppRightGlove.position.set(0.4, 1.2, -0.3);
+            
+            opponentMesh.add(oppLeftGlove, oppRightGlove);
+            opponentMesh.position.set(0, 0, -0.8);
+            scene.add(opponentMesh);
+
+            // 내 팔 생성 및 카메라(시선)에 부착하여 폰 움직임 따라가게 함
+            leftArmGroup = createArm(0x2ed573);
+            rightArmGroup = createArm(0x2ed573);
+            
+            leftArmGroup.position.copy(lArmBase);
+            rightArmGroup.position.copy(rArmBase);
+            
+            camera.add(leftArmGroup);
+            camera.add(rightArmGroup);
+            scene.add(camera);
+
+            window.addEventListener('resize', onWindowResize);
+            animate();
+        }
+
+        // 타격 파티클 이펙트 생성 함수
+        function createHitParticles(pos) {
+            for(let i=0; i<10; i++) {
+                const geo = new THREE.SphereGeometry(0.05, 4, 4);
+                const mat = new THREE.MeshBasicMaterial({ color: 0xf1c40f });
+                const mesh = new THREE.Mesh(geo, mat);
+                mesh.position.copy(pos);
+                // 랜덤한 방향으로 퍼지게 설정
+                mesh.userData.velocity = new THREE.Vector3(
+                    (Math.random() - 0.5) * 0.2,
+                    (Math.random() - 0.5) * 0.2,
+                    (Math.random() - 0.5) * 0.2
+                );
+                mesh.userData.life = 1.0;
+                scene.add(mesh);
+                particles.push(mesh);
+            }
+        }
+
+        function animateMyAttack(type) {
+            let isLeft = Math.random() > 0.5;
+            let targetGroup = isLeft ? leftArmGroup : rightArmGroup;
+            let targetPos = isLeft ? lArmTarget : rArmTarget;
+            
+            if (type === 'straight') {
+                targetPos.set(0, -0.1, -1.8); // 화면 정중앙 앞으로 깊게 뻗음
+            } else if (type === 'hook') {
+                targetPos.set(isLeft ? 0.8 : -0.8, -0.1, -1.2); // 옆으로 넓게 휘두름
+            } else if (type === 'uppercut') {
+                targetPos.set(0, 0.5, -1.2); // 위로 올려침
+            }
+
+            // 원위치 복귀 (0.25초 후)
+            setTimeout(() => {
+                targetPos.copy(isLeft ? lArmBase : rArmBase);
+            }, 250);
+        }
+
+        function animateOpponentAttack(type) {
+            let isLeft = Math.random() > 0.5;
+            let targetGlove = isLeft ? oppLeftGlove : oppRightGlove;
+            let origZ = targetGlove.position.z;
+            let origY = targetGlove.position.y;
+            let origX = targetGlove.position.x;
+
+            if (type === 'straight') { targetGlove.position.set(0, 1.6, 0.8); } 
+            else if (type === 'hook') { targetGlove.position.set(isLeft ? 0.8 : -0.8, 1.4, 0.5); } 
+            else if (type === 'uppercut') { targetGlove.position.set(0, 0.5, 0.5); }
+
+            setTimeout(() => { targetGlove.position.set(origX, origY, origZ); }, 250);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 1. 카메라 Y축 (피하기 부드러운 애니메이션)
+            camera.position.y = THREE.MathUtils.lerp(camera.position.y, targetCameraY, 0.1);
+
+            // 2. 카메라 화면 흔들림 효과 (피격 시)
+            if(screenShake > 0) {
+                camera.position.x += (Math.random() - 0.5) * screenShake;
+                camera.position.z += (Math.random() - 0.5) * screenShake;
+                screenShake -= 0.02; // 점차 감소
+                if(screenShake < 0) {
+                    camera.position.x = 0; 
+                    camera.position.z = 2;
+                }
+            }
+
+            // 3. 내 팔 위치 부드러운 애니메이션 (Lerp)
+            leftArmGroup.position.lerp(lArmTarget, 0.3);
+            rightArmGroup.position.lerp(rArmTarget, 0.3);
+
+            // 4. 상대방 아이들링 모션
+            if(opponentMesh && !isDodging) {
+                opponentMesh.position.y = Math.sin(Date.now() * 0.005) * 0.05;
+                // 상대방 시선이 나를 향하도록
+                opponentMesh.lookAt(camera.position.x, opponentMesh.position.y, camera.position.z);
+            }
+
+            // 5. 파티클 이펙트 업데이트
+            for(let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i];
+                p.position.add(p.userData.velocity);
+                p.userData.life -= 0.05;
+                p.scale.setScalar(p.userData.life);
+                if(p.userData.life <= 0) {
+                    scene.remove(p);
+                    particles.splice(i, 1);
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        init3D();
+    </script>
+</body>
+</html>

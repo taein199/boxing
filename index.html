@@ -50,7 +50,7 @@
     <div id="debug">System Ready</div>
 
     <script>
-        // --- 사운드 효과 (Web Audio API) ---
+        // --- 사운드 효과 ---
         let audioCtx;
         function initAudio() {
             if(!audioCtx) {
@@ -64,14 +64,14 @@
             osc.connect(gain);
             gain.connect(audioCtx.destination);
             
-            if(type === 'swing') { // 주먹 휘두르는 소리
+            if(type === 'swing') { 
                 osc.type = 'sine';
                 osc.frequency.setValueAtTime(150, audioCtx.currentTime);
                 osc.frequency.exponentialRampToValueAtTime(50, audioCtx.currentTime + 0.1);
                 gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
                 gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
                 osc.start(); osc.stop(audioCtx.currentTime + 0.1);
-            } else if (type === 'hit') { // 타격음 (묵직한 소리)
+            } else if (type === 'hit') { 
                 osc.type = 'square';
                 osc.frequency.setValueAtTime(100, audioCtx.currentTime);
                 osc.frequency.exponentialRampToValueAtTime(20, audioCtx.currentTime + 0.2);
@@ -89,8 +89,8 @@
         let isDodging = false;
         let canAction = true;
         
-        let screenShake = 0; // 화면 흔들림 강도
-        let particles = []; // 타격 이펙트 파티클
+        let screenShake = 0;
+        let particles = [];
 
         const urlHash = window.location.hash.substring(1);
         if (urlHash) { isHost = false; targetPeerId = urlHash; }
@@ -129,7 +129,6 @@
                         myHp = Math.max(0, myHp - damage);
                         document.getElementById('my-hp').style.width = myHp + '%';
                         
-                        // 타격 효과 (화면 흔들림 + 빨간 번쩍임)
                         screenShake = 0.2; 
                         document.getElementById('damage-flash').style.opacity = '0.5';
                         setTimeout(() => { document.getElementById('damage-flash').style.opacity = '0'; }, 100);
@@ -145,11 +144,11 @@
                     oppHp = Math.max(0, oppHp - dmg);
                     document.getElementById('opp-hp').style.width = oppHp + '%';
                     playSound('hit');
-                    createHitParticles(new THREE.Vector3(0, 1.4, -0.8)); // 상대방 위치에 파티클
+                    createHitParticles(new THREE.Vector3(0, 1.4, -0.8));
                     showText("적중!!", 800, '#f1c40f');
                     checkGameOver();
                 } else if (data.type === 'dodge_start') {
-                    opponentMesh.position.y = -0.5; // 상대가 숙임
+                    opponentMesh.position.y = -0.5; // 상대방이 웅크린 모습 연출
                 } else if (data.type === 'dodge_end') {
                     opponentMesh.position.y = 0;
                 }
@@ -173,7 +172,7 @@
 
         // --- 센서 모션 (타격 및 회피) ---
         function initMotionSensors() {
-            initAudio(); // 권한 버튼 누를 때 오디오 활성화
+            initAudio(); 
             if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
                 DeviceMotionEvent.requestPermission().then(state => {
                     if (state === 'granted') {
@@ -188,40 +187,50 @@
             initPeer();
         }
 
-        // 모션 감지 로직 개선
+        // 가속도 센서 (펀치 전용)
         function handleMotion(event) {
-            if (!canAction) return;
+            if (!canAction || isDodging) return; // 피하는 중에는 공격 불가
             let acc = event.acceleration || event.accelerationIncludingGravity;
             if (!acc || acc.x === null) return;
 
             let debug = document.getElementById('debug');
-            const threshold = 10; // 모션 인식 민감도 (조금 더 부드럽게)
+            const threshold = 10; 
 
-            // 1. 피하기 (Sudden Drop): 폰이 갑자기 아래로 쑥 내려갈 때 (Y축 하강 가속도)
-            if (acc.y < -12) { 
-                if(!isDodging) triggerDodge();
-                debug.innerText = "Motion: DODGE (Drop)";
-                return;
-            }
-            // 2. 스트레이트: 앞으로 강하게 내지름 (Z축 음수)
+            // 1. 스트레이트: 앞으로 강하게 내지름
             if (acc.z < -threshold) { triggerMyAttack('straight'); debug.innerText = "Motion: STRAIGHT"; return; }
-            // 3. 훅: 좌우로 강하게 꺾음/휘두름 (X축 변화)
+            // 2. 훅: 좌우로 강하게 휘두름
             if (Math.abs(acc.x) > threshold + 2) { triggerMyAttack('hook'); debug.innerText = "Motion: HOOK"; return; }
-            // 4. 어퍼컷: 위로 강하게 쳐올림 (Y축 상승)
+            // 3. 어퍼컷: 위로 강하게 쳐올림
             if (acc.y > threshold) { triggerMyAttack('uppercut'); debug.innerText = "Motion: UPPERCUT"; return; }
         }
 
-        // 카메라 기울기(자이로스코프) 적용
-        let baseAlpha = null;
+        // 자이로스코프 센서 (시선 처리 및 기울기 회피)
         function handleOrientation(event) {
-            if(event.alpha === null) return;
-            // 카메라 시선 처리 (폰의 움직임에 따라 시선과 팔이 같이 움직임)
-            const beta = THREE.MathUtils.degToRad(event.beta - 90); // 세로 기울기
-            const gamma = THREE.MathUtils.degToRad(event.gamma); // 가로 기울기
+            if(event.beta === null) return;
             
-            // 시야 부드럽게 회전
-            camera.rotation.x = THREE.MathUtils.lerp(camera.rotation.x, beta * 0.5, 0.1);
-            camera.rotation.y = THREE.MathUtils.lerp(camera.rotation.y, gamma * -0.5, 0.1);
+            // 1. 카메라 시선 부드럽게 회전
+            const betaRad = THREE.MathUtils.degToRad(event.beta - 90); 
+            const gammaRad = THREE.MathUtils.degToRad(event.gamma); 
+            camera.rotation.x = THREE.MathUtils.lerp(camera.rotation.x, betaRad * 0.5, 0.1);
+            camera.rotation.y = THREE.MathUtils.lerp(camera.rotation.y, gammaRad * -0.5, 0.1);
+
+            // 2. 기울기로 웅크리기(피하기) 구현
+            // 평소 폰을 들고 있는 각도(beta)는 70~90도. 폰을 눕히면(45도 이하) 피하기 발동
+            if (event.beta < 45 && event.beta > -90) {
+                if (!isDodging && canAction) {
+                    isDodging = true;
+                    sendAction('dodge_start');
+                    targetCameraY = 0.5; // 시야를 아래로 확 낮춤
+                    document.getElementById('debug').innerText = "Status: DODGING (Tilt)";
+                }
+            } else {
+                if (isDodging) {
+                    isDodging = false;
+                    sendAction('dodge_end');
+                    targetCameraY = 1.6; // 원래 시야 높이로 복구
+                    document.getElementById('debug').innerText = "Status: READY";
+                }
+            }
         }
 
         function triggerMyAttack(type) {
@@ -229,18 +238,7 @@
             playSound('swing');
             sendAction(type);
             animateMyAttack(type);
-            setTimeout(() => { canAction = true; }, 500); // 쿨타임 감소시켜 스피디하게
-        }
-
-        function triggerDodge() {
-            isDodging = true;
-            sendAction('dodge_start');
-            targetCameraY = 0.5; // 카메라를 확 낮춤
-            setTimeout(() => { 
-                isDodging = false; 
-                sendAction('dodge_end'); 
-                targetCameraY = 1.6; // 복구
-            }, 800);
+            setTimeout(() => { canAction = true; }, 500); 
         }
 
         // PC 테스트용 키보드 조작
@@ -249,7 +247,16 @@
             if (e.key === 'w') triggerMyAttack('straight');
             if (e.key === 'a' || e.key === 'd') triggerMyAttack('hook');
             if (e.key === 'q') triggerMyAttack('uppercut');
-            if (e.key === 's') triggerDodge();
+            if (e.key === 's') { // S키 누르고 있는 동안 피하기
+                if(!isDodging) {
+                    isDodging = true; sendAction('dodge_start'); targetCameraY = 0.5;
+                }
+            }
+        });
+        window.addEventListener('keyup', (e) => {
+            if (e.key === 's' && isDodging) {
+                isDodging = false; sendAction('dodge_end'); targetCameraY = 1.6;
+            }
         });
 
         document.getElementById('start-motion-btn').addEventListener('click', () => {
@@ -258,15 +265,13 @@
             if(isHost) document.getElementById('lobby-title').innerText = "상대방 접속 대기중...";
         });
 
-        // --- Three.js 그래픽 및 애니메이션 렌더링 ---
+        // --- Three.js 그래픽 렌더링 ---
         let scene, camera, renderer;
         let opponentMesh;
-        let leftArmGroup, rightArmGroup; // 개선된 길쭉한 팔
+        let leftArmGroup, rightArmGroup; 
         let oppLeftGlove, oppRightGlove;
         let targetCameraY = 1.6;
-        let cameraBaseY = 1.6;
 
-        // 팔 애니메이션 타겟 위치
         let lArmTarget = new THREE.Vector3(-0.3, -0.4, -0.5);
         let rArmTarget = new THREE.Vector3(0.3, -0.4, -0.5);
         let lArmBase = new THREE.Vector3(-0.3, -0.4, -0.5);
@@ -274,17 +279,16 @@
 
         function createArm(color) {
             const group = new THREE.Group();
-            // 긴 팔 (Cylinder)
             const armGeo = new THREE.CylinderGeometry(0.06, 0.08, 0.6, 12);
-            armGeo.rotateX(Math.PI / 2); // 앞으로 뻗도록 회전
+            armGeo.rotateX(Math.PI / 2); 
             const armMat = new THREE.MeshStandardMaterial({ color: 0x555555 });
             const arm = new THREE.Mesh(armGeo, armMat);
             arm.position.z = 0.3;
-            // 글러브 (Sphere)
+            
             const gloveGeo = new THREE.SphereGeometry(0.15, 16, 16);
             const gloveMat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.4 });
             const glove = new THREE.Mesh(gloveGeo, gloveMat);
-            glove.position.z = -0.1; // 실린더 끝에 부착
+            glove.position.z = -0.1; 
             
             group.add(arm);
             group.add(glove);
@@ -309,12 +313,10 @@
             spotLight.angle = Math.PI / 4;
             scene.add(spotLight);
 
-            // 링 바닥 (격자 무늬)
             const gridHelper = new THREE.GridHelper(10, 10, 0xff4757, 0x444444);
             gridHelper.position.y = 0;
             scene.add(gridHelper);
 
-            // 상대방 구성
             opponentMesh = new THREE.Group();
             const bodyGeo = new THREE.CylinderGeometry(0.4, 0.3, 1.2, 12);
             const bodyMat = new THREE.MeshStandardMaterial({ color: 0x303952 });
@@ -339,7 +341,6 @@
             opponentMesh.position.set(0, 0, -0.8);
             scene.add(opponentMesh);
 
-            // 내 팔 생성 및 카메라(시선)에 부착하여 폰 움직임 따라가게 함
             leftArmGroup = createArm(0x2ed573);
             rightArmGroup = createArm(0x2ed573);
             
@@ -354,18 +355,14 @@
             animate();
         }
 
-        // 타격 파티클 이펙트 생성 함수
         function createHitParticles(pos) {
             for(let i=0; i<10; i++) {
                 const geo = new THREE.SphereGeometry(0.05, 4, 4);
                 const mat = new THREE.MeshBasicMaterial({ color: 0xf1c40f });
                 const mesh = new THREE.Mesh(geo, mat);
                 mesh.position.copy(pos);
-                // 랜덤한 방향으로 퍼지게 설정
                 mesh.userData.velocity = new THREE.Vector3(
-                    (Math.random() - 0.5) * 0.2,
-                    (Math.random() - 0.5) * 0.2,
-                    (Math.random() - 0.5) * 0.2
+                    (Math.random() - 0.5) * 0.2, (Math.random() - 0.5) * 0.2, (Math.random() - 0.5) * 0.2
                 );
                 mesh.userData.life = 1.0;
                 scene.add(mesh);
@@ -378,18 +375,11 @@
             let targetGroup = isLeft ? leftArmGroup : rightArmGroup;
             let targetPos = isLeft ? lArmTarget : rArmTarget;
             
-            if (type === 'straight') {
-                targetPos.set(0, -0.1, -1.8); // 화면 정중앙 앞으로 깊게 뻗음
-            } else if (type === 'hook') {
-                targetPos.set(isLeft ? 0.8 : -0.8, -0.1, -1.2); // 옆으로 넓게 휘두름
-            } else if (type === 'uppercut') {
-                targetPos.set(0, 0.5, -1.2); // 위로 올려침
-            }
+            if (type === 'straight') { targetPos.set(0, -0.1, -1.8); } 
+            else if (type === 'hook') { targetPos.set(isLeft ? 0.8 : -0.8, -0.1, -1.2); } 
+            else if (type === 'uppercut') { targetPos.set(0, 0.5, -1.2); }
 
-            // 원위치 복귀 (0.25초 후)
-            setTimeout(() => {
-                targetPos.copy(isLeft ? lArmBase : rArmBase);
-            }, 250);
+            setTimeout(() => { targetPos.copy(isLeft ? lArmBase : rArmBase); }, 250);
         }
 
         function animateOpponentAttack(type) {
@@ -415,41 +405,32 @@
         function animate() {
             requestAnimationFrame(animate);
 
-            // 1. 카메라 Y축 (피하기 부드러운 애니메이션)
-            camera.position.y = THREE.MathUtils.lerp(camera.position.y, targetCameraY, 0.1);
-
-            // 2. 카메라 화면 흔들림 효과 (피격 시)
+            // 카메라 시야 및 흔들림 부드러운 전환
+            camera.position.y = THREE.MathUtils.lerp(camera.position.y, targetCameraY, 0.15);
             if(screenShake > 0) {
                 camera.position.x += (Math.random() - 0.5) * screenShake;
                 camera.position.z += (Math.random() - 0.5) * screenShake;
-                screenShake -= 0.02; // 점차 감소
-                if(screenShake < 0) {
-                    camera.position.x = 0; 
-                    camera.position.z = 2;
-                }
+                screenShake -= 0.02; 
+                if(screenShake < 0) { camera.position.x = 0; camera.position.z = 2; }
             }
 
-            // 3. 내 팔 위치 부드러운 애니메이션 (Lerp)
+            // 내 팔 애니메이션
             leftArmGroup.position.lerp(lArmTarget, 0.3);
             rightArmGroup.position.lerp(rArmTarget, 0.3);
 
-            // 4. 상대방 아이들링 모션
+            // 상대방 움직임
             if(opponentMesh && !isDodging) {
-                opponentMesh.position.y = Math.sin(Date.now() * 0.005) * 0.05;
-                // 상대방 시선이 나를 향하도록
+                opponentMesh.position.y = THREE.MathUtils.lerp(opponentMesh.position.y, Math.sin(Date.now() * 0.005) * 0.05, 0.1);
                 opponentMesh.lookAt(camera.position.x, opponentMesh.position.y, camera.position.z);
             }
 
-            // 5. 파티클 이펙트 업데이트
+            // 파티클
             for(let i = particles.length - 1; i >= 0; i--) {
                 let p = particles[i];
                 p.position.add(p.userData.velocity);
                 p.userData.life -= 0.05;
                 p.scale.setScalar(p.userData.life);
-                if(p.userData.life <= 0) {
-                    scene.remove(p);
-                    particles.splice(i, 1);
-                }
+                if(p.userData.life <= 0) { scene.remove(p); particles.splice(i, 1); }
             }
 
             renderer.render(scene, camera);
